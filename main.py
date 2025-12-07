@@ -10,17 +10,39 @@ from yt_dlp import YoutubeDL
 # Setup
 # -----------------------------
 DOWNLOAD_DIR = "downloads"
-COOKIE_FILE = "cookies.txt"      # <--- ADD YOUR EXPORTED COOKIES HERE
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-app = FastAPI(title="yt-dlp Backend API with Cookie Support")
+app = FastAPI(title="Simple yt-dlp API (Render compatible)")
 
 
-# -----------------------------
-# Helper: Download with yt-dlp
-# -----------------------------
-def download_with_ytdlp(url: str, ydl_opts: dict):
+def build_ydl_opts(media_type: str) -> dict:
+    """
+    yt-dlp options factory.
+    No cookies, JS warning handled via extractor_args.
+    """
+    base_opts = {
+        "noplaylist": True,
+        "quiet": True,
+        # Fix JavaScript runtime warning by forcing default client
+        "extractor_args": {"youtube": {"player_client": ["default"]}},
+    }
+
+    if media_type == "audio":
+        base_opts["format"] = "bestaudio/best"
+    else:
+        # video (720p max) + best audio
+        base_opts["format"] = "bestvideo[height<=720]+bestaudio/best/best[height<=720]"
+
+    return base_opts
+
+
+def download_with_ytdlp(url: str, media_type: str):
+    """
+    Run yt-dlp download and return (filepath, elapsed_seconds).
+    """
     start = time.time()
+
+    ydl_opts = build_ydl_opts(media_type)
 
     # unique filename
     unique_id = str(uuid.uuid4())[:8]
@@ -29,93 +51,85 @@ def download_with_ytdlp(url: str, ydl_opts: dict):
     try:
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-
     except Exception as e:
-        # Handle YouTube CAPTCHA / BOT block
-        if "Sign in to confirm" in str(e):
+        # If YouTube blocks server IP with "Sign in to confirm" etc.
+        msg = str(e)
+        if "Sign in to confirm" in msg:
             raise HTTPException(
                 status_code=403,
-                detail="YouTube blocked this video for server IP. Cookies required or expired."
+                detail=(
+                    "YouTube is asking for sign-in / CAPTCHA for this video from server IP. "
+                    "Try another video URL."
+                ),
             )
-
         print("yt-dlp error:", repr(e))
         raise HTTPException(status_code=400, detail=f"yt-dlp error: {e}")
 
-    # Safely detect final file path
+    # Resolve final filepath
     filepath = None
-    if "requested_downloads" in info and info["requested_downloads"]:
-        filepath = info["requested_downloads"][0].get("filepath")
-    elif "filepath" in info:
-        filepath = info["filepath"]
+    if isinstance(info, dict):
+        if "requested_downloads" in info and info["requested_downloads"]:
+            filepath = info["requested_downloads"][0].get("filepath")
+        elif "filepath" in info:
+            filepath = info["filepath"]
 
     elapsed = time.time() - start
 
     if not filepath or not os.path.exists(filepath):
+        print("DEBUG: yt-dlp info:", info)
         raise HTTPException(
             status_code=500,
-            detail="Download finished but file path not found."
+            detail="Download finished but file path not found on disk.",
         )
 
-    print(f"[yt-dlp] Downloaded in {elapsed:.2f}s → {filepath}")
+    print(f"[yt-dlp] Downloaded in {elapsed:.2f} seconds -> {filepath}")
     return filepath, elapsed
 
 
-# -----------------------------
-# /api/download endpoint
-# -----------------------------
 @app.get("/api/download")
 async def api_download(
-    url: str = Query(..., description="YouTube Video URL"),
+    url: str = Query(..., description="Video URL"),
     type: str = Query("video", description="audio or video"),
-    show_time: bool = Query(False, description="Show processing time page"),
+    show_time: bool = Query(
+        False,
+        description="If true, show HTML page with processing time instead of direct download",
+    ),
 ):
+    """
+    Example:
+    - /api/download?url=...&type=audio
+    - /api/download?url=...&type=video
+    - /api/download?url=...&type=video&show_time=true
+    """
     url = url.strip()
     if not url:
-        raise HTTPException(status_code=400, detail="URL is required")
+        raise HTTPException(status_code=400, detail="url is required")
 
-    # Base options for yt-dlp (with COOKIES)
-    base_opts = {
-        "cookiefile": COOKIE_FILE if os.path.exists(COOKIE_FILE) else None,
-        "extractor_args": {"youtube": {"player_client": ["default"]}},
-        "noplaylist": True,
-        "quiet": True,
-    }
+    media_type = "audio" if type.lower() == "audio" else "video"
 
-    # AUDIO mode
-    if type == "audio":
-        ydl_opts = {
-            **base_opts,
-            "format": "bestaudio/best",
-        }
-
-    # VIDEO mode
-    else:
-        ydl_opts = {
-            **base_opts,
-            "format": "bestvideo[height<=720]+bestaudio/best/best[height<=720]",
-        }
-
-    filepath, elapsed = download_with_ytdlp(url, ydl_opts)
+    filepath, elapsed = download_with_ytdlp(url, media_type)
     filename = os.path.basename(filepath)
 
-    # If show_time = true → HTML page + auto download
     if show_time:
         html = f"""
         <!doctype html>
         <html>
-        <head><meta charset="utf-8"><title>Processing Time</title></head>
+        <head>
+            <meta charset="utf-8">
+            <title>Processing Time</title>
+        </head>
         <body style="font-family:sans-serif;">
             <h2>Download complete ✅</h2>
             <p><b>Processing time:</b> {elapsed:.2f} seconds</p>
             <p><b>File:</b> {filename}</p>
-            <p>If download didn't start, <a href="/file/{filename}" download>click here</a>.</p>
+            <p>If download didn't start automatically, <a href="/file/{filename}" download>click here</a>.</p>
             <iframe src="/file/{filename}" style="display:none;"></iframe>
         </body>
         </html>
         """
         return HTMLResponse(content=html)
 
-    # Direct file download
+    # Normal direct download
     return FileResponse(
         filepath,
         filename=filename,
@@ -124,32 +138,29 @@ async def api_download(
     )
 
 
-# -----------------------------
-# File server route
-# -----------------------------
 @app.get("/file/{filename}")
 async def get_file(filename: str):
+    """
+    Serve a downloaded file.
+    """
     filepath = os.path.join(DOWNLOAD_DIR, filename)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(filepath, filename=filename, media_type="application/octet-stream")
 
 
-# -----------------------------
-# Root info
-# -----------------------------
 @app.get("/")
 async def root():
     return {
         "status": "OK",
-        "message": "yt-dlp backend online",
-        "example": "/api/download?url=https://youtu.be/VIDEO_ID&type=video&show_time=true",
+        "message": "yt-dlp FastAPI backend running",
+        "example_video": "/api/download?url=https://youtu.be/VIDEO_ID&type=video",
+        "example_audio": "/api/download?url=https://youtu.be/VIDEO_ID&type=audio",
+        "example_video_show_time": "/api/download?url=https://youtu.be/VIDEO_ID&type=video&show_time=true",
     }
 
 
-# -----------------------------
-# Run locally
-# -----------------------------
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("main:app", host="0.0.0.0", port=8000)
