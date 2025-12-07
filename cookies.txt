@@ -1,2 +1,0 @@
-Cookie: CONSENT=YES+something
-
