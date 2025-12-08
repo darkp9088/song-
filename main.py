@@ -7,19 +7,13 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse
 from pytube import YouTube
 
-# Download folder
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-app = FastAPI(title="Pytube Example API")
+app = FastAPI(title="Pytube Example API (Debug)")
 
 
 def download_with_pytube(url: str, media_type: str):
-    """
-    Pytube se YouTube video/audio download karega:
-    - final file ka path return karega
-    - processing time (seconds) return karega
-    """
     start = time.time()
 
     # --- YouTube object banaye ---
@@ -29,20 +23,19 @@ def download_with_pytube(url: str, media_type: str):
         # YouTube ne direct HTTP error de diya
         raise HTTPException(
             status_code=400,
-            detail=f"YouTube HTTP error (init): {e}"
+            detail=f"YouTube HTTP error (init): {e.__class__.__name__}: {e}"
         )
     except Exception as e:
+        # yahan hame exact class + message chahiye
         raise HTTPException(
             status_code=400,
-            detail=f"YouTube init error: {e}"
+            detail=f"YouTube init error: {e.__class__.__name__}: {e}"
         )
 
-    # unique prefix for filename
     unique_id = str(uuid.uuid4())[:8]
 
     # --- AUDIO MODE ---
     if media_type == "audio":
-        # best audio stream (example style)
         stream = (
             yt.streams
             .filter(only_audio=True)
@@ -51,9 +44,7 @@ def download_with_pytube(url: str, media_type: str):
             .first()
         )
     else:
-        # --- VIDEO MODE (exact official example style) ---
-        # yt.streams.filter(progressive=True, file_extension='mp4') \
-        #   .order_by('resolution').desc().first()
+        # --- VIDEO MODE (pytube official example style) ---
         stream = (
             yt.streams
             .filter(progressive=True, file_extension="mp4")
@@ -65,26 +56,25 @@ def download_with_pytube(url: str, media_type: str):
     if not stream:
         raise HTTPException(
             status_code=404,
-            detail="No valid stream found for this URL."
+            detail="No valid stream found for this URL (pytube returned no stream)."
         )
 
-    # base filename from pytube
-    original_filename = stream.default_filename  # e.g. "Some Video Title.mp4"
+    original_filename = stream.default_filename  # e.g. "Video Title.mp4"
     final_filename = f"{unique_id}-{original_filename}"
     final_path = os.path.join(DOWNLOAD_DIR, final_filename)
 
-    # --- DOWNLOAD ACTUAL FILE ---
     try:
         stream.download(output_path=DOWNLOAD_DIR, filename=final_filename)
     except HTTPError as e:
         raise HTTPException(
             status_code=400,
-            detail=f"YouTube HTTP error (download): {e}"
+            detail=f"YouTube HTTP error (download): {e.__class__.__name__}: {e}"
         )
     except Exception as e:
+        # yaha bhi exact error class + message dikhaenge
         raise HTTPException(
             status_code=500,
-            detail=f"Download error: {e}"
+            detail=f"Download error: {e.__class__.__name__}: {e}"
         )
 
     elapsed = time.time() - start
@@ -108,33 +98,17 @@ async def api_download(
         description="true = show HTML with processing time; false = direct download",
     ),
 ):
-    """
-    Example:
-    - /api/download?url=https://youtu.be/2lAe1cqCOXo&type=video
-    - /api/download?url=https://youtu.be/2lAe1cqCOXo&type=audio
-    - /api/download?url=https://youtu.be/2lAe1cqCOXo&type=video&show_time=true
-    """
     url = url.strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
 
     media_type = "audio" if type.lower() == "audio" else "video"
 
-    try:
-        filepath, elapsed = download_with_pytube(url, media_type)
-    except HTTPException:
-        # already proper FastAPI error
-        raise
-    except Exception as e:
-        # generic unexpected error
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unexpected server error: {e}"
-        )
-
+    # Yahan koi generic `except Exception` nahi rakhenge,
+    # taaki HTTPException ka detail seedha response me dikhe
+    filepath, elapsed = download_with_pytube(url, media_type)
     filename = os.path.basename(filepath)
 
-    # --- HTML mode with processing time + auto-download ---
     if show_time:
         html = f"""
         <!doctype html>
@@ -147,17 +121,15 @@ async def api_download(
             <h2>Download complete ✅ (pytube)</h2>
             <p><b>Processing time:</b> {elapsed:.2f} seconds</p>
             <p><b>File:</b> {filename}</p>
-            <p>If download didn't start automatically, 
+            <p>If download didn't start automatically,
                <a href="/file/{filename}" download>click here</a>.
             </p>
-            <!-- Auto-download via hidden iframe -->
             <iframe src="/file/{filename}" style="display:none;"></iframe>
         </body>
         </html>
         """
         return HTMLResponse(content=html)
 
-    # --- Direct file download ---
     return FileResponse(
         filepath,
         filename=filename,
@@ -168,10 +140,6 @@ async def api_download(
 
 @app.get("/file/{filename}")
 async def get_file(filename: str):
-    """
-    Serve already-downloaded file.
-    Used by the HTML auto-download iframe.
-    """
     filepath = os.path.join(DOWNLOAD_DIR, filename)
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="File not found")
@@ -185,7 +153,7 @@ async def get_file(filename: str):
 @app.get("/")
 async def root():
     return {
-        "message": "Pytube API running ✅",
+        "message": "Pytube API running ✅ (Debug)",
         "example_video": "/api/download?url=https://youtu.be/2lAe1cqCOXo&type=video",
         "example_audio": "/api/download?url=https://youtu.be/2lAe1cqCOXo&type=audio",
         "example_video_show_time": "/api/download?url=https://youtu.be/2lAe1cqCOXo&type=video&show_time=true",
