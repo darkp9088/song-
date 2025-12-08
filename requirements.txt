@@ -1,4 +1,3 @@
 fastapi
 uvicorn[standard]
-pytube
-
+pytube @ git+https://github.com/pytube/pytube
